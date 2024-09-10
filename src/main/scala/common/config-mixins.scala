@@ -170,6 +170,104 @@ class WithNMediumBooms(n: Int = 1, overrideIdOffset: Option[Int] = None) extends
     case XLen => 64
   })
 )
+/*
+  - We were finally able to match the bandwidth of the medium boom with this setup
+    the last thing we changed was the row bits of the icache 6300MB/s
+  - We then decreased the size of the re-order buffer and load/store queues 6300MB/s
+  - We then decreased the decode and dispatch width 6622.62 MB/s
+  - We then decreased the reservation station size to their original MedBoom values 6622.62 MB/s
+
+  class WithNMediumBoomsLargeFetchBuffer(n: Int = 1, overrideIdOffset: Option[Int] = None) extends Config (
+  new WithTAGELBPD ++ // Default to TAGE-L BPD
+  new Config((site, here, up) => {
+    case TilesLocated(InSubsystem) => {
+      val prev = up(TilesLocated(InSubsystem), site)
+      val idOffset = overrideIdOffset.getOrElse(prev.size)
+      (0 until n).map { i =>
+        BoomTileAttachParams(
+          tileParams = BoomTileParams(
+            core = BoomCoreParams(
+              fetchWidth = 8,
+              decodeWidth = 2, // 3 --> 2
+              numRobEntries = 64, // 63->64
+              issueParams = Seq(
+                IssueParams(issueWidth=1, numEntries=12, iqType=IQT_MEM.litValue, dispatchWidth=2), //  turned this down
+                IssueParams(issueWidth=2, numEntries=20, iqType=IQT_INT.litValue, dispatchWidth=2),//  turned this down
+                IssueParams(issueWidth=1, numEntries=16, iqType=IQT_FP.litValue , dispatchWidth=2)),//  turned this down
+              numIntPhysRegisters = 80,
+              numFpPhysRegisters = 64,
+              numLdqEntries = 16,
+              numStqEntries = 16,
+              maxBrCount = 12,
+              numFetchBufferEntries = 24,
+              ftq = FtqParameters(nEntries=32),
+              nPerfCounters = 6,
+              fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true))
+            ),
+            dcache = Some(
+              DCacheParams(rowBits = 128, nSets=64, nWays=4, nMSHRs=6, nTLBWays=8)
+            ),
+            icache = Some(
+              ICacheParams(rowBits = 128, nSets=64, nWays=8, fetchBytes=4*4) 
+            ),
+            hartId = i + idOffset
+          ),
+          crossingParams = RocketCrossingParams()
+        )
+      } ++ prev
+    }
+    case XLen => 64
+  })
+)
+*/
+
+
+
+
+
+
+class WithNMediumBoomsLargeFetchBuffer(n: Int = 1, overrideIdOffset: Option[Int] = None) extends Config (
+  new WithTAGELBPD ++ // Default to TAGE-L BPD
+  new Config((site, here, up) => {
+    case TilesLocated(InSubsystem) => {
+      val prev = up(TilesLocated(InSubsystem), site)
+      val idOffset = overrideIdOffset.getOrElse(prev.size)
+      (0 until n).map { i =>
+        BoomTileAttachParams(
+          tileParams = BoomTileParams(
+            core = BoomCoreParams(
+              fetchWidth = 8,
+              decodeWidth = 2, // 3 --> 2
+              numRobEntries = 64, // 63->64
+              issueParams = Seq(
+                IssueParams(issueWidth=2, numEntries=12, iqType=IQT_MEM.litValue, dispatchWidth=2), //  turned this down
+                IssueParams(issueWidth=2, numEntries=20, iqType=IQT_INT.litValue, dispatchWidth=2),//  turned this down
+                IssueParams(issueWidth=1, numEntries=16, iqType=IQT_FP.litValue , dispatchWidth=2)),//  turned this down
+              numIntPhysRegisters = 80,
+              numFpPhysRegisters = 64,
+              numLdqEntries = 16,
+              numStqEntries = 16,
+              maxBrCount = 12,
+              numFetchBufferEntries = 24,
+              ftq = FtqParameters(nEntries=32),
+              nPerfCounters = 6,
+              fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true))
+            ),
+            dcache = Some(
+              DCacheParams(rowBits = 128, nSets=64, nWays=4, nMSHRs=6, nTLBWays=8)
+            ),
+            icache = Some(
+              ICacheParams(rowBits = 128, nSets=64, nWays=8, fetchBytes=4*4) 
+            ),
+            hartId = i + idOffset
+          ),
+          crossingParams = RocketCrossingParams()
+        )
+      } ++ prev
+    }
+    case XLen => 64
+  })
+)
 // DOC include start: LargeBoomConfig
 /**
  * 3-wide BOOM. Try to match the Cortex-A15.
@@ -188,6 +286,10 @@ class WithNLargeBooms(n: Int = 1, overrideIdOffset: Option[Int] = None) extends 
               decodeWidth = 3,
               numRobEntries = 96,
               issueParams = Seq(
+                // According to Shen&Lipasti --> issue is the initation of execution on a functional unit
+                //                               and dispatch is the sending of instructions to resrvation stations
+                //                               NOTE: if reservation station is centralized, these are the same thing so 
+                //                                     this appears to not be the case
                 IssueParams(issueWidth=1, numEntries=16, iqType=IQT_MEM.litValue, dispatchWidth=3),
                 IssueParams(issueWidth=3, numEntries=32, iqType=IQT_INT.litValue, dispatchWidth=3),
                 IssueParams(issueWidth=1, numEntries=24, iqType=IQT_FP.litValue , dispatchWidth=3)),
@@ -201,7 +303,7 @@ class WithNLargeBooms(n: Int = 1, overrideIdOffset: Option[Int] = None) extends 
               fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true))
             ),
             dcache = Some(
-              DCacheParams(rowBits = 128, nSets=64, nWays=8, nMSHRs=4, nTLBWays=16)
+              DCacheParams(rowBits = 128, nSets=64, nWays=8, nMSHRs=6, nTLBWays=16)
             ),
             icache = Some(
               ICacheParams(rowBits = 128, nSets=64, nWays=8, fetchBytes=4*4)
