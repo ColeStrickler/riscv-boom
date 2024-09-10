@@ -48,7 +48,7 @@ import boom.util._
 /**
  * Top level core object that connects the Frontend to the rest of the pipeline.
  */
-class BoomCore()(implicit p: Parameters) extends BoomModule
+class BoomCore()(tile: BoomTileModuleImp, implicit p: Parameters) extends BoomModule
   with HasBoomFrontendParameters // TODO: Don't add this trait
 {
   val io = IO(new Bundle {
@@ -904,7 +904,9 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   // If we issue loads back-to-back endlessly (probably because we are executing some tight loop)
   // the store buffer will never drain, breaking the memory-model forward-progress guarantee
   // If we see a large number of loads saturate the LSU, pause for a cycle to let a store drain
-  val loads_saturating = (mem_iss_unit.io.iss_valids(0) && mem_iss_unit.io.iss_uops(0).uses_ldq)
+  // We also make sure that the store queue is non empty --> added
+  val loads_saturating = (mem_iss_unit.io.iss_valids(0) && mem_iss_unit.io.iss_uops(0).uses_ldq && tile.lsu.io.stq_nonempty)
+ 
   val saturating_loads_counter = RegInit(0.U(5.W))
   when (loads_saturating) { saturating_loads_counter := saturating_loads_counter + 1.U }
   .otherwise { saturating_loads_counter := 0.U }

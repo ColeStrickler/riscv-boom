@@ -160,7 +160,7 @@ class LSUIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
   val ptw   = new rocket.TLBPTWIO
   val core  = new LSUCoreIO
   val dmem  = new LSUDMemIO
-
+  val stq_nonempty = Output(Bool())
   val hellacache = Flipped(new freechips.rocketchip.rocket.HellaCacheIO)
 }
 
@@ -283,6 +283,16 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   var st_enq_idx = stq_tail
 
   val stq_nonempty = (0 until numStqEntries).map{ i => stq(i).valid }.reduce(_||_) =/= 0.U
+
+
+  /* 
+    output if there is actually a store in the store queue
+
+    In core.scala, loads are stalled if they are issued back to back to allow the store queue to clear,
+    This is unneccessary if there are no stores to actually clear
+  */
+  io.stq_nonempty := stq_nonempty 
+
 
   var ldq_full = Bool()
   var stq_full = Bool()
