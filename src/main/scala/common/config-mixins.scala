@@ -240,7 +240,7 @@ class WithNMediumBoomsLargeFetchBuffer(n: Int = 1, overrideIdOffset: Option[Int]
               decodeWidth = 2, // 3 --> 2
               numRobEntries = 64, // 63->64
               issueParams = Seq(
-                IssueParams(issueWidth=2, numEntries=12, iqType=IQT_MEM.litValue, dispatchWidth=2), //  turned this down
+                IssueParams(issueWidth=1, numEntries=12, iqType=IQT_MEM.litValue, dispatchWidth=2), //  turned this down
                 IssueParams(issueWidth=2, numEntries=20, iqType=IQT_INT.litValue, dispatchWidth=2),//  turned this down
                 IssueParams(issueWidth=1, numEntries=16, iqType=IQT_FP.litValue , dispatchWidth=2)),//  turned this down
               numIntPhysRegisters = 80,
