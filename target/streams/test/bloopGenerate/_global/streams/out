@@ -1,0 +1,4 @@
+[debug] [boom-test] Classpath dependencies List(rocketchip)
+[debug] [boom-test] Dependencies from configurations List(boom)
+[debug] Bloop wrote the configuration of project 'boom-test' to '/home/c674s876/Documents/firesim/DOSvBRU-firesim/sim/.bloop/boom-test.json'
+[success] Generated .bloop/boom-test.json

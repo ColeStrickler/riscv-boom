@@ -1,0 +1,12 @@
+[0m[[0m[33mwarn[0m] [0m[0m/home/c674s876/Documents/firesim/DOSvBRU-firesim/target-design/chipyard/generators/boom/src/main/scala/exu/core.scala:641:70: Auto-application to `()` is deprecated. Supply the empty argument list `()` explicitly to invoke method NullMicroOp,[0m
+[0m[[0m[33mwarn[0m] [0m[0mor remove the empty argument list from its definition (Java-defined methods are exempt).[0m
+[0m[[0m[33mwarn[0m] [0m[0mIn Scala 3, an unapplied method like this will be eta-expanded into a function.[0m
+[0m[[0m[33mwarn[0m] [0m[0m    val f_uop   = if (usingFPU) fp_rename_stage.io.ren2_uops(w) else NullMicroOp[0m
+[0m[[0m[33mwarn[0m] [0m[0m                                                                     ^[0m
+[0m[[0m[33mwarn[0m] [0m[0m/home/c674s876/Documents/firesim/DOSvBRU-firesim/target-design/chipyard/generators/boom/src/main/scala/exu/core.scala:642:76: Auto-application to `()` is deprecated. Supply the empty argument list `()` explicitly to invoke method NullMicroOp,[0m
+[0m[[0m[33mwarn[0m] [0m[0mor remove the empty argument list from its definition (Java-defined methods are exempt).[0m
+[0m[[0m[33mwarn[0m] [0m[0mIn Scala 3, an unapplied method like this will be eta-expanded into a function.[0m
+[0m[[0m[33mwarn[0m] [0m[0m    val p_uop   = if (enableSFBOpt) pred_rename_stage.io.ren2_uops(w) else NullMicroOp[0m
+[0m[[0m[33mwarn[0m] [0m[0m                                                                           ^[0m
+[0m[[0m[33mwarn[0m] [0m[0m269 feature warnings; re-run with -feature for details[0m
+[0m[[0m[33mwarn[0m] [0m[0mthree warnings found[0m
