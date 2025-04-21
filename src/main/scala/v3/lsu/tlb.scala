@@ -13,6 +13,7 @@ import freechips.rocketchip.util._
 import boom.v3.common._
 import boom.v3.exu.{BrResolutionInfo, Exception, FuncUnitResp, CommitSignals}
 import boom.v3.util.{BoolToChar, AgePriorityEncoder, IsKilledByBranch, GetNewBrMask, WrapInc, IsOlder, UpdateBrMask}
+import midas.targetutils.SynthesizePrintf
 
 class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p) {
   require(!instruction)
@@ -29,6 +30,7 @@ class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge
 
   class EntryData extends Bundle {
     val ppn = UInt(ppnBits.W)
+    val dm = Bool()
     val u = Bool()
     val g = Bool()
     val ae = Bool()
@@ -179,7 +181,9 @@ class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge
   when (do_refill) {
     val pte = io.ptw.resp.bits.pte
     val newEntry = Wire(new EntryData)
+    SynthesizePrintf("TLB do refill: pte.dm %d\n", pte.dm)
     newEntry.ppn := pte.ppn
+    newEntry.dm := pte.dm
     newEntry.c := cacheable(0)
     newEntry.u := pte.u
     newEntry.g := pte.g
@@ -272,6 +276,10 @@ class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge
 
   val tlb_hit = widthMap(w => real_hits(w).orR)
   val tlb_miss = widthMap(w => vm_enabled(w) && !bad_va(w) && !tlb_hit(w))
+  when (tlb_miss.reduce(_||_))
+  {
+    SynthesizePrintf("TLB MISS\n")
+  }
 
   val sectored_plru = new PseudoLRU(sectored_entries.size)
   val superpage_plru = new PseudoLRU(superpage_entries.size)
