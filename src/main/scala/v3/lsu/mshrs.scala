@@ -15,6 +15,7 @@ import freechips.rocketchip.tilelink._
 import freechips.rocketchip.tile._
 import freechips.rocketchip.util._
 import freechips.rocketchip.rocket._
+import midas.targetutils.SynthesizePrintf
 
 import boom.v3.common._
 import boom.v3.exu.BrUpdateInfo
@@ -442,8 +443,15 @@ class BoomIOMSHR(id: Int)(implicit edge: TLEdgeOut, p: Parameters) extends BoomM
   val a_size    = req.uop.mem_size
   val a_data    = Fill(beatWords, req.data)
 
-  val get      = edge.Get(a_source, a_address, a_size)._2
+  val get      = edge.Get(a_source, a_address, a_size, req.dm)._2
   val put      = edge.Put(a_source, a_address, a_size, a_data)._2
+  put.dm      := req.dm // i think this is fine
+  
+  when (put.dm || get.dm)
+  {
+    SynthesizePrintf("BoomIOMSHR %d, %d\n", put.dm, get.dm)
+  }
+
   val atomics  = if (edge.manager.anySupportLogical) {
     MuxLookup(req.uop.mem_cmd, (0.U).asTypeOf(new TLBundleA(edge.bundle)))(Array(
       M_XA_SWAP -> edge.Logical(a_source, a_address, a_size, a_data, TLAtomics.SWAP)._2,

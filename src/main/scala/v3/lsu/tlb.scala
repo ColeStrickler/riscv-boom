@@ -182,6 +182,11 @@ class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge
     val pte = io.ptw.resp.bits.pte
     val newEntry = Wire(new EntryData)
     SynthesizePrintf("TLB do refill: pte.dm %d\n", pte.dm)
+    /*
+      Can we not load code into this cache?
+    */
+
+
     newEntry.ppn := pte.ppn
     newEntry.dm := pte.dm
     newEntry.c := cacheable(0)
@@ -215,6 +220,7 @@ class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge
   }
 
   val entries = widthMap(w => VecInit(all_entries.map(_.getData(vpn(w)))))
+  val dm_val = widthMap(w => entries(w).map(_.dm).asUInt)
   val normal_entries = widthMap(w => VecInit(ordinary_entries.map(_.getData(vpn(w)))))
   val nPhysicalEntries = 1 + special_entry.size
   val ptw_ae_array = widthMap(w => Cat(false.B, entries(w).map(_.ae).asUInt))
@@ -276,10 +282,7 @@ class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge
 
   val tlb_hit = widthMap(w => real_hits(w).orR)
   val tlb_miss = widthMap(w => vm_enabled(w) && !bad_va(w) && !tlb_hit(w))
-  when (tlb_miss.reduce(_||_))
-  {
-    SynthesizePrintf("TLB MISS\n")
-  }
+
 
   val sectored_plru = new PseudoLRU(sectored_entries.size)
   val superpage_plru = new PseudoLRU(superpage_entries.size)
@@ -316,6 +319,7 @@ class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge
     io.resp(w).paddr := Cat(ppn(w), io.req(w).bits.vaddr(pgIdxBits-1, 0))
     io.resp(w).size := io.req(w).bits.size
     io.resp(w).cmd := io.req(w).bits.cmd
+    io.resp(w).dm  := dm_val(w)
   }
 
   io.ptw.req.valid := state === s_request

@@ -52,6 +52,7 @@ import freechips.rocketchip.util.Str
 import boom.v3.common._
 import boom.v3.exu.{BrUpdateInfo, Exception, FuncUnitResp, CommitSignals, ExeUnitResp}
 import boom.v3.util.{BoolToChar, AgePriorityEncoder, IsKilledByBranch, GetNewBrMask, WrapInc, IsOlder, UpdateBrMask}
+import midas.targetutils.SynthesizePrintf
 
 class LSUExeIO(implicit p: Parameters) extends BoomBundle()(p)
 {
@@ -65,6 +66,7 @@ class LSUExeIO(implicit p: Parameters) extends BoomBundle()(p)
 class BoomDCacheReq(implicit p: Parameters) extends BoomBundle()(p)
   with HasBoomUOP
 {
+  val dm = Bool()
   val addr  = UInt(coreMaxAddrBits.W)
   val data  = Bits(coreDataBits.W)
   val is_hella = Bool() // Is this the hellacache req? If so this is not tracked in LDQ or STQ
@@ -207,8 +209,12 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
   val ldq = Reg(Vec(numLdqEntries, Valid(new LDQEntry)))
   val stq = Reg(Vec(numStqEntries, Valid(new STQEntry)))
+  
 
-
+  when (io.ptw.resp.valid)
+  {
+    SynthesizePrintf("io.ptw.resp.valid 0x%x\n", io.ptw.resp.bits.pte.dm)
+  }
 
   val ldq_head         = Reg(UInt(ldqAddrSz.W))
   val ldq_tail         = Reg(UInt(ldqAddrSz.W))
@@ -709,6 +715,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   val exe_tlb_miss  = widthMap(w => dtlb.io.req(w).valid && (dtlb.io.resp(w).miss || !dtlb.io.req(w).ready))
   val exe_tlb_paddr = widthMap(w => Cat(dtlb.io.resp(w).paddr(paddrBits-1,corePgIdxBits),
                                         exe_tlb_vaddr(w)(corePgIdxBits-1,0)))
+  val exe_tlb_dm    = widthMap(w => dtlb.io.resp(w).dm)
   val exe_tlb_uncacheable = widthMap(w => !(dtlb.io.resp(w).cacheable))
 
   for (w <- 0 until memWidth) {
@@ -761,6 +768,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     dmem_req(w).bits.addr  := 0.U
     dmem_req(w).bits.data  := 0.U
     dmem_req(w).bits.is_hella := false.B
+    dmem_req(w).bits.dm := exe_tlb_dm(w)
 
     io.dmem.s1_kill(w) := false.B
 
