@@ -130,7 +130,7 @@ class BoomTraceBundle extends Bundle {
 /**
   * Defines custom BOOM CSRs
   */
-class BoomCustomCSRs(implicit p: Parameters) extends freechips.rocketchip.tile.CustomCSRs
+class BoomCustomCSRs(extraCSRs: Seq[CustomCSR] = Seq.empty)(implicit p: Parameters) extends freechips.rocketchip.tile.CustomCSRs
   with HasBoomCoreParameters {
   override def chickenCSR = {
     val params = tileParams.core.asInstanceOf[BoomCoreParams]
@@ -151,7 +151,7 @@ class BoomCustomCSRs(implicit p: Parameters) extends freechips.rocketchip.tile.C
   def disableOOO = getOrElse(chickenCSR, _.value(3), true.B)
   def marchid = CustomCSR.constant(CSRs.marchid, BigInt(2))
 
-  override def decls: Seq[CustomCSR] = super.decls :+ marchid
+  override def decls: Seq[CustomCSR] = super.decls ++ Seq(marchid) ++ extraCSRs
 }
 
 /**

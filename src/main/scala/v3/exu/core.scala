@@ -32,18 +32,59 @@ import java.nio.file.{Paths}
 
 import chisel3._
 import chisel3.util._
-
+import freechips.rocketchip.tile._
 import org.chipsalliance.cde.config.Parameters
 import freechips.rocketchip.rocket.Instructions._
 import freechips.rocketchip.tile.{TraceBundle}
 import freechips.rocketchip.rocket.{Causes, PRV, TracedInstruction}
 import freechips.rocketchip.util.{Str, UIntIsOneOf, CoreMonitorBundle}
 import freechips.rocketchip.devices.tilelink.{PLICConsts, CLINTConsts}
-
+import freechips.rocketchip.rocket._
 import boom.v3.common._
 import boom.v3.ifu.{GlobalHistory, HasBoomFrontendParameters}
 import boom.v3.exu.FUConstants._
 import boom.v3.util._
+
+
+class BoomUarchCounters(retireWidth: Int)(implicit p: Parameters) extends Module {
+  val io = IO(new Bundle {
+    val robFullStall = Input(Bool())
+    val squashUops   = Input(UInt(log2Ceil(retireWidth+1).W))
+    val robEmpty  = Input(Bool())
+  })
+
+
+  def GenCustomCSRs() : Seq[CustomCSR] = {
+    val csrs = Seq(
+      CustomCSR(0xB20, mask = BigInt(0), init = None),    // ROB Full Stall
+      CustomCSR(0xB21,  mask = BigInt(0), init = None),    // ROB Empty Count
+      CustomCSR(0xB22,  mask = BigInt(0), init = None),   // Squash Op Count
+    )
+
+
+    /*
+      Make sure we are not reusing CSR IDs
+    */
+    val usedCSRs = CSRs.all.toSet
+    for (c <- csrs) {
+      val candidate = c.id
+      require(!usedCSRs.contains(candidate)) 
+    }
+    
+
+    csrs
+  }
+
+  val robFullCycles = RegInit(0.U(64.W))
+  val squashCount   = RegInit(0.U(64.W))
+  val robEmptyCount  = RegInit(0.U(64.W))
+
+  robFullCycles := robFullCycles + io.robFullStall
+  squashCount   := squashCount   + io.squashUops
+  robEmptyCount  := robEmptyCount  + io.robEmpty
+}
+
+
 
 /**
  * Top level core object that connects the Frontend to the rest of the pipeline.
@@ -268,12 +309,26 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
       ("ITLB miss",   () => io.ifu.perf.tlbMiss),
       ("DTLB miss",   () => io.lsu.perf.tlbMiss),
       ("L2 TLB miss", () => io.ptw.perf.l2miss)))))
-  val csr = Module(new freechips.rocketchip.rocket.CSRFile(perfEvents, boomParams.customCSRs.decls))
+  val csr = Module(new freechips.rocketchip.rocket.CSRFile(perfEvents, boomParams.customCSRs.decls, customCounters=true))
   csr.io.inst foreach { c => c := DontCare }
   csr.io.rocc_interrupt := io.rocc.interrupt
   csr.io.mhtinst_read_pseudo := false.B
 
-  val custom_csrs = Wire(new BoomCustomCSRs)
+
+
+  csr.io.customCounter.robFull := rob.io.full
+  csr.io.customCounter.robEmpty := rob.io.empty
+  csr.io.customCounter.brMispredict := mispredict_val
+  csr.io.customCounter.l1Imiss := io.ifu.perf.acquire
+  csr.io.customCounter.l1Dmiss := io.lsu.perf.acquire
+  csr.io.customCounter.l1DRelease := io.lsu.perf.release
+  csr.io.customCounter.iTLBMiss := io.ifu.perf.tlbMiss
+  csr.io.customCounter.dTLBMiss := io.lsu.perf.tlbMiss
+  csr.io.customCounter.l2TLBMiss := io.ptw.perf.l2miss
+
+
+
+  val custom_csrs = Wire(new BoomCustomCSRs())
   custom_csrs.csrs.foreach { c => c.stall := false.B; c.set := false.B; c.sdata := DontCare }
 
   (custom_csrs.csrs zip csr.io.customCSRs).map { case (lhs, rhs) => lhs <> rhs }

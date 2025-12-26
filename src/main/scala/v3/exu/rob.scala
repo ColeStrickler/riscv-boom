@@ -104,6 +104,8 @@ class RobIo(
   // Stall Decode as appropriate
   val empty = Output(Bool())
   val ready = Output(Bool()) // ROB is busy unrolling rename state...
+  val full =  Output(Bool())
+
 
   // Stall the frontend if we know we will redirect the PC
   val flush_frontend = Output(Bool())
@@ -800,6 +802,7 @@ class Rob(
   io.rob_tail_idx := rob_tail_idx
   io.rob_pnr_idx  := rob_pnr_idx
   io.empty        := empty
+  io.full         := full
   io.ready        := (rob_state === s_normal) && !full && !r_xcpt_val
 
   //-----------------------------------------------
