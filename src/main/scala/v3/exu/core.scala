@@ -44,45 +44,8 @@ import boom.v3.common._
 import boom.v3.ifu.{GlobalHistory, HasBoomFrontendParameters}
 import boom.v3.exu.FUConstants._
 import boom.v3.util._
+import midas.targetutils.SynthesizePrintf
 
-
-class BoomUarchCounters(retireWidth: Int)(implicit p: Parameters) extends Module {
-  val io = IO(new Bundle {
-    val robFullStall = Input(Bool())
-    val squashUops   = Input(UInt(log2Ceil(retireWidth+1).W))
-    val robEmpty  = Input(Bool())
-  })
-
-
-  def GenCustomCSRs() : Seq[CustomCSR] = {
-    val csrs = Seq(
-      CustomCSR(0xB20, mask = BigInt(0), init = None),    // ROB Full Stall
-      CustomCSR(0xB21,  mask = BigInt(0), init = None),    // ROB Empty Count
-      CustomCSR(0xB22,  mask = BigInt(0), init = None),   // Squash Op Count
-    )
-
-
-    /*
-      Make sure we are not reusing CSR IDs
-    */
-    val usedCSRs = CSRs.all.toSet
-    for (c <- csrs) {
-      val candidate = c.id
-      require(!usedCSRs.contains(candidate)) 
-    }
-    
-
-    csrs
-  }
-
-  val robFullCycles = RegInit(0.U(64.W))
-  val squashCount   = RegInit(0.U(64.W))
-  val robEmptyCount  = RegInit(0.U(64.W))
-
-  robFullCycles := robFullCycles + io.robFullStall
-  squashCount   := squashCount   + io.squashUops
-  robEmptyCount  := robEmptyCount  + io.robEmpty
-}
 
 
 
@@ -315,6 +278,10 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   csr.io.mhtinst_read_pseudo := false.B
 
 
+  val NumStallFP  = WireInit(VecInit(Seq.fill(issueParams.size)(0.U(5.W))))
+  val NumStallInt = WireInit(VecInit(Seq.fill(issueParams.size)(0.U(5.W))))
+
+
 
   csr.io.customCounter.robFull := rob.io.full
   csr.io.customCounter.robEmpty := rob.io.empty
@@ -325,7 +292,8 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   csr.io.customCounter.iTLBMiss := io.ifu.perf.tlbMiss
   csr.io.customCounter.dTLBMiss := io.lsu.perf.tlbMiss
   csr.io.customCounter.l2TLBMiss := io.ptw.perf.l2miss
-
+  csr.io.customCounter.fpIssueFull := NumStallFP.reduce(_ + _)
+  csr.io.customCounter.intIssueFull := NumStallInt.reduce(_ + _)
 
 
   val custom_csrs = Wire(new BoomCustomCSRs())
@@ -827,14 +795,41 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   var iu_idx = 0
   // Send dispatched uops to correct issue queues
   // Backpressure through dispatcher if necessary
+
+
+ 
   for (i <- 0 until issueParams.size) {
     if (issueParams(i).iqType == IQT_FP.litValue) {
-       fp_pipeline.io.dis_uops <> dispatcher.io.dis_uops(i)
+        fp_pipeline.io.dis_uops <> dispatcher.io.dis_uops(i)
+
+
+        /*
+          Cycles stalled on an issue unit
+        */
+        val fp_stalls = dispatcher.io.dis_uops(i).zip(fp_pipeline.io.dis_uops).map {
+          case (dis, fp) => dis.valid && !fp.ready
+        }
+        val fp_fires = fp_pipeline.io.dis_uops.map(_.fire)
+        val num_fp_stalls = PopCount(fp_stalls)
+        NumStallFP(i) := num_fp_stalls
+
     } else {
        issue_units(iu_idx).io.dis_uops <> dispatcher.io.dis_uops(i)
+
+
+
+      val int_stalls = dispatcher.io.dis_uops(i).zip(issue_units(iu_idx).io.dis_uops).map {
+        case (dis, iunit) => dis.valid && !iunit.ready
+      }
+      val num_int_stalls = PopCount(int_stalls)
+      NumStallInt(i) := num_int_stalls
+
+
        iu_idx += 1
     }
   }
+
+ 
 
   //-------------------------------------------------------------
   //-------------------------------------------------------------
