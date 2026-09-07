@@ -52,6 +52,7 @@ import freechips.rocketchip.util.Str
 import boom.v3.common._
 import boom.v3.exu.{BrUpdateInfo, Exception, FuncUnitResp, CommitSignals, ExeUnitResp}
 import boom.v3.util.{BoolToChar, AgePriorityEncoder, IsKilledByBranch, GetNewBrMask, WrapInc, IsOlder, UpdateBrMask}
+import midas.targetutils.SynthesizePrintf
 
 class LSUExeIO(implicit p: Parameters) extends BoomBundle()(p)
 {
@@ -68,6 +69,7 @@ class BoomDCacheReq(implicit p: Parameters) extends BoomBundle()(p)
   val addr  = UInt(coreMaxAddrBits.W)
   val data  = Bits(coreDataBits.W)
   val is_hella = Bool() // Is this the hellacache req? If so this is not tracked in LDQ or STQ
+  val dm = Bool()
 }
 
 class BoomDCacheResp(implicit p: Parameters) extends BoomBundle()(p)
@@ -170,6 +172,7 @@ class LDQEntry(implicit p: Parameters) extends BoomBundle()(p)
   val addr                = Valid(UInt(coreMaxAddrBits.W))
   val addr_is_virtual     = Bool() // Virtual address, we got a TLB miss
   val addr_is_uncacheable = Bool() // Uncacheable, wait until head of ROB to execute
+  val dm                  = Bool() // Deterministic-memory attribute from the DTLB
 
   val executed            = Bool() // load sent to memory, reset by NACKs
   val succeeded           = Bool()
@@ -190,6 +193,7 @@ class STQEntry(implicit p: Parameters) extends BoomBundle()(p)
 {
   val addr                = Valid(UInt(coreMaxAddrBits.W))
   val addr_is_virtual     = Bool() // Virtual address, we got a TLB miss
+  val dm                  = Bool() // Deterministic-memory attribute from the DTLB
   val data                = Valid(UInt(xLen.W))
 
   val committed           = Bool() // committed by ROB
@@ -241,11 +245,17 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
   val hella_req             = Reg(new rocket.HellaCacheReq)
   val hella_data            = Reg(new rocket.HellaCacheWriteData)
   val hella_paddr           = Reg(UInt(paddrBits.W))
+  val hella_dm              = RegInit(false.B)
   val hella_xcpt            = Reg(new rocket.HellaCacheExceptions)
 
 
   val dtlb = Module(new NBDTLB(
     instruction = false, lgMaxSize = log2Ceil(coreDataBytes), rocket.TLBConfig(dcacheParams.nTLBSets, dcacheParams.nTLBWays)))
+
+  if (p(DMVerificationKey)) {
+    val verification = Module(new DMTLBRaceVerification)
+    dontTouch(verification.io.done)
+  }
 
   io.ptw <> dtlb.io.ptw
   io.core.perf.tlbMiss := io.ptw.req.fire
@@ -307,6 +317,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       ldq(ld_enq_idx).bits.st_dep_mask     := next_live_store_mask
 
       ldq(ld_enq_idx).bits.addr.valid      := false.B
+      ldq(ld_enq_idx).bits.dm              := false.B
       ldq(ld_enq_idx).bits.executed        := false.B
       ldq(ld_enq_idx).bits.succeeded       := false.B
       ldq(ld_enq_idx).bits.order_fail      := false.B
@@ -321,6 +332,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       stq(st_enq_idx).valid           := true.B
       stq(st_enq_idx).bits.uop        := io.core.dis_uops(w).bits
       stq(st_enq_idx).bits.addr.valid := false.B
+      stq(st_enq_idx).bits.dm         := false.B
       stq(st_enq_idx).bits.data.valid := false.B
       stq(st_enq_idx).bits.committed  := false.B
       stq(st_enq_idx).bits.succeeded  := false.B
@@ -761,6 +773,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     dmem_req(w).bits.addr  := 0.U
     dmem_req(w).bits.data  := 0.U
     dmem_req(w).bits.is_hella := false.B
+    dmem_req(w).bits.dm       := false.B
 
     io.dmem.s1_kill(w) := false.B
 
@@ -768,6 +781,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       dmem_req(w).valid      := !exe_tlb_miss(w) && !exe_tlb_uncacheable(w)
       dmem_req(w).bits.addr  := exe_tlb_paddr(w)
       dmem_req(w).bits.uop   := exe_tlb_uop(w)
+      dmem_req(w).bits.dm    := dtlb.io.resp(w).dm
 
       s0_executing_loads(ldq_incoming_idx(w)) := dmem_req_fire(w)
       assert(!ldq_incoming_e(w).bits.executed)
@@ -775,6 +789,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       dmem_req(w).valid      := !exe_tlb_miss(w) && !exe_tlb_uncacheable(w)
       dmem_req(w).bits.addr  := exe_tlb_paddr(w)
       dmem_req(w).bits.uop   := exe_tlb_uop(w)
+      dmem_req(w).bits.dm    := dtlb.io.resp(w).dm
 
       s0_executing_loads(ldq_retry_idx) := dmem_req_fire(w)
       assert(!ldq_retry_e.bits.executed)
@@ -786,6 +801,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
                                     stq_commit_e.bits.data.bits,
                                     coreDataBytes)).data
       dmem_req(w).bits.uop      := stq_commit_e.bits.uop
+      dmem_req(w).bits.dm       := stq_commit_e.bits.dm
 
       stq_execute_head                     := Mux(dmem_req_fire(w),
                                                 WrapInc(stq_execute_head, numStqEntries),
@@ -796,6 +812,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       dmem_req(w).valid      := true.B
       dmem_req(w).bits.addr  := ldq_wakeup_e.bits.addr.bits
       dmem_req(w).bits.uop   := ldq_wakeup_e.bits.uop
+      dmem_req(w).bits.dm    := ldq_wakeup_e.bits.dm
 
       s0_executing_loads(ldq_wakeup_idx) := dmem_req_fire(w)
 
@@ -813,8 +830,10 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       dmem_req(w).bits.uop.mem_size   := hella_req.size
       dmem_req(w).bits.uop.mem_signed := hella_req.signed
       dmem_req(w).bits.is_hella       := true.B
+      dmem_req(w).bits.dm             := Mux(hella_req.phys, false.B, dtlb.io.resp(w).dm)
 
       hella_paddr := exe_tlb_paddr(w)
+      hella_dm    := Mux(hella_req.phys, false.B, dtlb.io.resp(w).dm)
     }
       .elsewhen (will_fire_hella_wakeup(w))
     {
@@ -829,6 +848,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       dmem_req(w).bits.uop.mem_size   := hella_req.size
       dmem_req(w).bits.uop.mem_signed := hella_req.signed
       dmem_req(w).bits.is_hella       := true.B
+      dmem_req(w).bits.dm             := hella_dm
     }
 
     //-------------------------------------------------------------
@@ -841,6 +861,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       ldq(ldq_idx).bits.uop.pdst            := exe_tlb_uop(w).pdst
       ldq(ldq_idx).bits.addr_is_virtual     := exe_tlb_miss(w)
       ldq(ldq_idx).bits.addr_is_uncacheable := exe_tlb_uncacheable(w) && !exe_tlb_miss(w)
+      ldq(ldq_idx).bits.dm                   := dtlb.io.resp(w).dm
 
       assert(!(will_fire_load_incoming(w) && ldq_incoming_e(w).bits.addr.valid),
         "[lsu] Incoming load is overwriting a valid address")
@@ -855,6 +876,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       stq(stq_idx).bits.addr.bits  := Mux(exe_tlb_miss(w), exe_tlb_vaddr(w), exe_tlb_paddr(w))
       stq(stq_idx).bits.uop.pdst   := exe_tlb_uop(w).pdst // Needed for AMOs
       stq(stq_idx).bits.addr_is_virtual := exe_tlb_miss(w)
+      stq(stq_idx).bits.dm              := dtlb.io.resp(w).dm
 
       assert(!(will_fire_sta_incoming(w) && stq_incoming_e(w).bits.addr.valid),
         "[lsu] Incoming store is overwriting a valid address")
@@ -877,6 +899,21 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
         io.core.fp_stdata.bits.data)
       assert(!(stq(sidx).bits.data.valid),
         "[lsu] Incoming store is overwriting a valid data entry")
+    }
+  }
+
+  for (w <- 0 until memWidth) {
+    when (io.dmem.req.fire && dmem_req(w).valid) {
+      SynthesizePrintf("[DM_LSU_DCACHE_REQ] port=%d paddr=0x%x dm=%d cmd=%d ldq=%d stq=%d\n",
+        w.U, dmem_req(w).bits.addr, dmem_req(w).bits.dm, dmem_req(w).bits.uop.mem_cmd,
+        dmem_req(w).bits.uop.ldq_idx, dmem_req(w).bits.uop.stq_idx)
+    }
+  }
+  if (memWidth == 2) {
+    when (io.dmem.req.fire && dmem_req(0).valid && dmem_req(1).valid) {
+      SynthesizePrintf("[DM_LSU_DUAL_FIRE] paddr0=0x%x dm0=%d cmd0=%d paddr1=0x%x dm1=%d cmd1=%d\n",
+        dmem_req(0).bits.addr, dmem_req(0).bits.dm, dmem_req(0).bits.uop.mem_cmd,
+        dmem_req(1).bits.addr, dmem_req(1).bits.dm, dmem_req(1).bits.uop.mem_cmd)
     }
   }
   val will_fire_stdf_incoming = io.core.fp_stdata.fire
@@ -1137,6 +1174,13 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     }
   }
 
+  for (i <- 0 until numLdqEntries) {
+    when (failed_loads(i)) {
+      SynthesizePrintf("[DM_LSU_ORDER_FAIL] paddr=0x%x dm=%d ldq=%d executed=%d succeeded=%d\n",
+        ldq(i).bits.addr.bits, ldq(i).bits.dm, i.U, ldq(i).bits.executed, ldq(i).bits.succeeded)
+    }
+  }
+
   for (i <- 0 until numStqEntries) {
     val s_addr = stq(i).bits.addr.bits
     val s_uop  = stq(i).bits.uop
@@ -1285,6 +1329,10 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     // Handle nacks
     when (io.dmem.nack(w).valid)
     {
+      SynthesizePrintf("[DM_LSU_NACK] paddr=0x%x dm=%d cmd=%d ldq=%d stq=%d\n",
+        io.dmem.nack(w).bits.addr, io.dmem.nack(w).bits.dm,
+        io.dmem.nack(w).bits.uop.mem_cmd, io.dmem.nack(w).bits.uop.ldq_idx,
+        io.dmem.nack(w).bits.uop.stq_idx)
       // We have to re-execute this!
       when (io.dmem.nack(w).bits.is_hella)
       {
@@ -1293,12 +1341,16 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
         .elsewhen (io.dmem.nack(w).bits.uop.uses_ldq)
       {
         assert(ldq(io.dmem.nack(w).bits.uop.ldq_idx).bits.executed)
+        assert(ldq(io.dmem.nack(w).bits.uop.ldq_idx).bits.dm === io.dmem.nack(w).bits.dm,
+          "[dm] load nack metadata differs from LDQ entry")
         ldq(io.dmem.nack(w).bits.uop.ldq_idx).bits.executed  := false.B
         nacking_loads(io.dmem.nack(w).bits.uop.ldq_idx) := true.B
       }
         .otherwise
       {
         assert(io.dmem.nack(w).bits.uop.uses_stq)
+        assert(stq(io.dmem.nack(w).bits.uop.stq_idx).bits.dm === io.dmem.nack(w).bits.dm,
+          "[dm] store nack metadata differs from STQ entry")
         when (IsOlder(io.dmem.nack(w).bits.uop.stq_idx, stq_execute_head, stq_head)) {
           stq_execute_head := io.dmem.nack(w).bits.uop.stq_idx
         }
@@ -1370,6 +1422,8 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       io.core.exe(w).fresp.bits.data := loadgen.data
 
       when (data_ready && live) {
+        SynthesizePrintf("[DM_LSU_FORWARD] paddr=0x%x dm=%d ldq=%d stq=%d\n",
+          wb_forward_ld_addr(w), ldq(f_idx).bits.dm, f_idx, wb_forward_stq_idx(w))
         ldq(f_idx).bits.succeeded := data_ready
         ldq(f_idx).bits.forward_std_val := true.B
         ldq(f_idx).bits.forward_stq_idx := wb_forward_stq_idx(w)
@@ -1409,6 +1463,8 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
       when (IsKilledByBranch(io.core.brupdate, stq(i).bits.uop))
       {
+        SynthesizePrintf("[DM_STQ_BRANCH_KILL] paddr=0x%x dm=%d stq=%d addr_valid=%d data_valid=%d\n",
+          stq(i).bits.addr.bits, stq(i).bits.dm, i.U, stq(i).bits.addr.valid, stq(i).bits.data.valid)
         stq(i).valid           := false.B
         stq(i).bits.addr.valid := false.B
         stq(i).bits.data.valid := false.B
@@ -1428,6 +1484,8 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       ldq(i).bits.uop.br_mask := GetNewBrMask(io.core.brupdate, ldq(i).bits.uop.br_mask)
       when (IsKilledByBranch(io.core.brupdate, ldq(i).bits.uop))
       {
+        SynthesizePrintf("[DM_LDQ_BRANCH_KILL] paddr=0x%x dm=%d ldq=%d addr_valid=%d executed=%d\n",
+          ldq(i).bits.addr.bits, ldq(i).bits.dm, i.U, ldq(i).bits.addr.valid, ldq(i).bits.executed)
         ldq(i).valid           := false.B
         ldq(i).bits.addr.valid := false.B
       }
@@ -1625,6 +1683,10 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
       {
         when (!stq(i).bits.committed && !stq(i).bits.succeeded)
         {
+          when (stq(i).valid) {
+            SynthesizePrintf("[DM_STQ_EXCEPTION_KILL] paddr=0x%x dm=%d stq=%d addr_valid=%d data_valid=%d\n",
+              stq(i).bits.addr.bits, stq(i).bits.dm, i.U, stq(i).bits.addr.valid, stq(i).bits.data.valid)
+          }
           stq(i).valid           := false.B
           stq(i).bits.addr.valid := false.B
           stq(i).bits.data.valid := false.B
@@ -1635,6 +1697,10 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
 
     for (i <- 0 until numLdqEntries)
     {
+      when (io.core.exception && ldq(i).valid) {
+        SynthesizePrintf("[DM_LDQ_EXCEPTION_KILL] paddr=0x%x dm=%d ldq=%d addr_valid=%d executed=%d\n",
+          ldq(i).bits.addr.bits, ldq(i).bits.dm, i.U, ldq(i).bits.addr.valid, ldq(i).bits.executed)
+      }
       ldq(i).valid           := false.B
       ldq(i).bits.addr.valid := false.B
       ldq(i).bits.executed   := false.B

@@ -19,6 +19,7 @@ import freechips.rocketchip.rocket._
 import boom.v3.common._
 import boom.v3.exu.BrUpdateInfo
 import boom.v3.util.{IsKilledByBranch, GetNewBrMask, BranchKillableQueue, IsOlder, UpdateBrMask, AgePriorityEncoder, WrapInc}
+import midas.targetutils.SynthesizePrintf
 
 class BoomDCacheReqInternal(implicit p: Parameters) extends BoomDCacheReq()(p)
   with HasL1HellaCacheParameters
@@ -156,7 +157,11 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   io.meta_write.valid    := false.B
   io.meta_write.bits     := DontCare
   io.req_pri_rdy         := false.B
-  io.req_sec_rdy         := sec_rdy && rpq.io.enq.ready
+  // A physical cache line must have one DM classification. Do not silently
+  // merge a secondary request whose virtual mapping disagrees with the
+  // primary request that determines the single downstream Acquire metadata.
+  val secondary_dm_match = io.req.dm === req.dm
+  io.req_sec_rdy         := sec_rdy && rpq.io.enq.ready && secondary_dm_match
   io.mem_acquire.valid   := false.B
   io.mem_acquire.bits    := DontCare
   io.refill.valid        := false.B
@@ -181,10 +186,16 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   io.mem_grant.ready     := false.B
 
   when (io.req_sec_val && io.req_sec_rdy) {
+    SynthesizePrintf("[DM_MSHR_SECONDARY] paddr=0x%x primary_dm=%d secondary_dm=%d source=%d cmd=%d primary_cmd=%d\n",
+      io.req.addr, req.dm, io.req.dm, io.id, io.req.uop.mem_cmd, req.uop.mem_cmd)
     req.uop.mem_cmd := dirtier_cmd
     when (is_hit_again) {
       new_coh := dirtier_coh
     }
+  }
+  when (io.req_sec_val && sec_rdy && rpq.io.enq.ready && !secondary_dm_match) {
+    SynthesizePrintf("[DM_MSHR_SECONDARY_BLOCK] paddr=0x%x primary_dm=%d secondary_dm=%d source=%d cmd=%d\n",
+      io.req.addr, req.dm, io.req.dm, io.id, io.req.uop.mem_cmd)
   }
 
   def handle_pri_req(old_state: UInt): UInt = {
@@ -227,7 +238,10 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
       toAddress       = Cat(req_tag, req_idx) << blockOffBits,
       lgSize          = lgCacheBlockBytes.U,
       growPermissions = grow_param)._2
+    io.mem_acquire.bits.user(DeterministicMemory) := req.dm
     when (io.mem_acquire.fire) {
+      SynthesizePrintf("[DM_DCACHE_MISS] paddr=0x%x dm=%d source=%d cmd=%d\n",
+        io.mem_acquire.bits.address, req.dm, io.mem_acquire.bits.source, req.uop.mem_cmd)
       state := s_refill_resp
     }
   } .elsewhen (state === s_refill_resp) {
@@ -351,6 +365,11 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.replay <> rpq.io.deq
     io.replay.bits.way_en    := req.way_en
     io.replay.bits.addr := Cat(req_tag, req_idx, rpq.io.deq.bits.addr(blockOffBits-1,0))
+    when (io.replay.fire) {
+      SynthesizePrintf("[DM_MSHR_REPLAY] paddr=0x%x dm=%d source=%d cmd=%d ldq=%d stq=%d\n",
+        io.replay.bits.addr, io.replay.bits.dm, io.id, io.replay.bits.uop.mem_cmd,
+        io.replay.bits.uop.ldq_idx, io.replay.bits.uop.stq_idx)
+    }
     when (io.replay.fire && isWrite(rpq.io.deq.bits.uop.mem_cmd)) {
       // Set dirty bit
       val (is_hit, _, coh_on_hit) = new_coh.onAccess(rpq.io.deq.bits.uop.mem_cmd)
@@ -396,6 +415,32 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
       grant_had_data := false.B
       state := handle_pri_req(state)
     }
+  }
+
+  val acquire_stalled = io.mem_acquire.valid && !io.mem_acquire.ready
+  val acquire_was_stalled = RegNext(acquire_stalled, false.B)
+  val stall_cycles = RegInit(0.U(32.W))
+  when (acquire_stalled) { stall_cycles := stall_cycles + 1.U }
+    .otherwise { stall_cycles := 0.U }
+  when (acquire_was_stalled && io.mem_acquire.fire) {
+    SynthesizePrintf("[DM_A_STALL_END] paddr=0x%x dm=%d source=%d cycles=%d\n",
+      io.mem_acquire.bits.address, req.dm, io.id, stall_cycles)
+  }
+  when (acquire_stalled && !acquire_was_stalled) {
+    SynthesizePrintf("[DM_A_STALL] paddr=0x%x dm=%d source=%d opcode=%d\n",
+      io.mem_acquire.bits.address, req.dm, io.id, io.mem_acquire.bits.opcode)
+  }
+  val stalled_acquire_address = RegEnable(io.mem_acquire.bits.address, acquire_stalled)
+  val stalled_acquire_source = RegEnable(io.mem_acquire.bits.source, acquire_stalled)
+  val stalled_acquire_opcode = RegEnable(io.mem_acquire.bits.opcode, acquire_stalled)
+  val stalled_acquire_dm = RegEnable(io.mem_acquire.bits.user(DeterministicMemory), acquire_stalled)
+  when (acquire_was_stalled) {
+    assert(io.mem_acquire.valid, "[dm] A-channel valid dropped under backpressure")
+    assert(io.mem_acquire.bits.address === stalled_acquire_address &&
+           io.mem_acquire.bits.source === stalled_acquire_source &&
+           io.mem_acquire.bits.opcode === stalled_acquire_opcode &&
+           io.mem_acquire.bits.user(DeterministicMemory) === stalled_acquire_dm,
+      "[dm] A-channel address/source/opcode/DM changed under backpressure")
   }
 }
 
@@ -455,6 +500,7 @@ class BoomIOMSHR(id: Int)(implicit edge: TLEdgeOut, p: Parameters) extends BoomM
 
   io.mem_access.valid := state === s_mem_access
   io.mem_access.bits  := Mux(isAMO(req.uop.mem_cmd), atomics, Mux(isRead(req.uop.mem_cmd), get, put))
+  io.mem_access.bits.user(DeterministicMemory) := req.dm
 
   val send_resp = isRead(req.uop.mem_cmd)
 
@@ -743,7 +789,30 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
 
   mmio_alloc_arb.io.out.ready := req.valid && !cacheable
 
-  TLArbiter.lowestFromSeq(edge, io.mem_acquire, mshrs.map(_.io.mem_acquire) ++ mmios.map(_.io.mem_access))
+  val cacheAcquires = mshrs.map { m =>
+    if (p(DMVerificationKey)) {
+      // Test-only bounded backpressure, before a request is exposed to TileLink.
+      val held = Wire(Decoupled(new TLBundleA(edge.bundle)))
+      val age = RegInit(0.U(6.W))
+      val release = age === 32.U
+      held.bits := m.io.mem_acquire.bits
+      held.valid := m.io.mem_acquire.valid && release
+      m.io.mem_acquire.ready := held.ready && release
+      when (m.io.mem_acquire.valid && !release) { age := age + 1.U }
+      when (!m.io.mem_acquire.valid || m.io.mem_acquire.fire) { age := 0.U }
+      held
+    } else m.io.mem_acquire
+  }
+  if (p(DMVerificationKey) && cfg.nMSHRs >= 2) {
+    val a = mshrs(0).io.mem_acquire
+    val b = mshrs(1).io.mem_acquire
+    val competing = a.valid && b.valid && a.bits.user(DeterministicMemory) =/= b.bits.user(DeterministicMemory)
+    when (competing && !RegNext(competing, false.B)) {
+      SynthesizePrintf("[DM_A_COMPETE] paddr0=0x%x dm0=%d paddr1=0x%x dm1=%d\n",
+        a.bits.address, a.bits.user(DeterministicMemory), b.bits.address, b.bits.user(DeterministicMemory))
+    }
+  }
+  TLArbiter.lowestFromSeq(edge, io.mem_acquire, cacheAcquires ++ mmios.map(_.io.mem_access))
   TLArbiter.lowestFromSeq(edge, io.mem_finish,  mshrs.map(_.io.mem_finish))
 
   val respq = Module(new BranchKillableQueue(new BoomDCacheResp, 4, u => u.uses_ldq, flow = false))

@@ -19,6 +19,7 @@ import freechips.rocketchip.rocket._
 import boom.v3.common._
 import boom.v3.exu.BrUpdateInfo
 import boom.v3.util.{IsKilledByBranch, GetNewBrMask, BranchKillableQueue, IsOlder, UpdateBrMask, AgePriorityEncoder, WrapInc, Transpose}
+import midas.targetutils.SynthesizePrintf
 
 
 class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCacheModule()(p) {
@@ -395,7 +396,8 @@ class BoomNonBlockingDCache(staticIdForMetadataUseOnly: Int)(implicit p: Paramet
 
   val node = TLClientNode(Seq(TLMasterPortParameters.v1(
     cacheClientParameters ++ mmioClientParameters,
-    minLatency = 1)))
+    minLatency = 1,
+    requestFields = Seq(DeterministicMemoryField()))))
 
 
   lazy val module = new BoomNonBlockingDCacheModule(this)
@@ -499,6 +501,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   replay_req(0).addr       := mshrs.io.replay.bits.addr
   replay_req(0).data       := mshrs.io.replay.bits.data
   replay_req(0).is_hella   := mshrs.io.replay.bits.is_hella
+  replay_req(0).dm         := mshrs.io.replay.bits.dm
   mshrs.io.replay.ready    := metaReadArb.io.in(0).ready && dataReadArb.io.in(0).ready
   // Tag read for MSHR replays
   // We don't actually need to read the metadata, for replays we already know our way
@@ -520,6 +523,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   mshr_read_req(0).addr     := Cat(mshrs.io.meta_read.bits.tag, mshrs.io.meta_read.bits.idx) << blockOffBits
   mshr_read_req(0).data     := DontCare
   mshr_read_req(0).is_hella := false.B
+  mshr_read_req(0).dm       := false.B
   metaReadArb.io.in(3).valid       := mshrs.io.meta_read.valid
   metaReadArb.io.in(3).bits.req(0) := mshrs.io.meta_read.bits
   mshrs.io.meta_read.ready         := metaReadArb.io.in(3).ready
@@ -535,6 +539,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   wb_req(0).addr     := Cat(wb.io.meta_read.bits.tag, wb.io.data_req.bits.addr)
   wb_req(0).data     := DontCare
   wb_req(0).is_hella := false.B
+  wb_req(0).dm       := false.B
   // Couple the two decoupled interfaces of the WBUnit's meta_read and data_read
   // Tag read for write-back
   metaReadArb.io.in(2).valid        := wb.io.meta_read.valid
@@ -556,6 +561,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   prober_req(0).addr     := Cat(prober.io.meta_read.bits.tag, prober.io.meta_read.bits.idx) << blockOffBits
   prober_req(0).data     := DontCare
   prober_req(0).is_hella := false.B
+  prober_req(0).dm       := false.B
   // Tag read for prober
   metaReadArb.io.in(1).valid       := prober.io.meta_read.valid
   metaReadArb.io.in(1).bits.req(0) := prober.io.meta_read.bits
@@ -733,8 +739,21 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s2_send_resp = widthMap(w => (RegNext(s1_send_resp_or_nack(w)) && !s2_nack(w) &&
                       (s2_hit(w) || (mshrs.io.req(w).fire && isWrite(s2_req(w).uop.mem_cmd) && !isRead(s2_req(w).uop.mem_cmd)))))
   val s2_send_nack = widthMap(w => (RegNext(s1_send_resp_or_nack(w)) && s2_nack(w)))
-  for (w <- 0 until memWidth)
+  if (p(DMVerificationKey) && memWidth == 2) {
+    when (s2_valid(0) && s2_valid(1)) {
+      SynthesizePrintf("[DM_DCACHE_PAIR] paddr0=0x%x dm0=%d hit0=%d nack0=%d paddr1=0x%x dm1=%d hit1=%d nack1=%d\n",
+        s2_req(0).addr, s2_req(0).dm, s2_hit(0), s2_nack(0),
+        s2_req(1).addr, s2_req(1).dm, s2_hit(1), s2_nack(1))
+    }
+  }
+  for (w <- 0 until memWidth) {
     assert(!(s2_send_resp(w) && s2_send_nack(w)))
+    when (s2_valid(w) && s2_send_nack(w)) {
+      SynthesizePrintf("[DM_DCACHE_NACK] paddr=0x%x dm=%d cmd=%d ldq=%d stq=%d\n",
+        s2_req(w).addr, s2_req(w).dm, s2_req(w).uop.mem_cmd,
+        s2_req(w).uop.ldq_idx, s2_req(w).uop.stq_idx)
+    }
+  }
 
   // hits always send a response
   // If MSHR is not available, LSU has to replay this request later
@@ -766,6 +785,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
     mshrs.io.req(w).bits.data        := s2_req(w).data
     mshrs.io.req(w).bits.is_hella    := s2_req(w).is_hella
+    mshrs.io.req(w).bits.dm          := s2_req(w).dm
     mshrs.io.req_is_probe(w)         := s2_type === t_probe && s2_valid(w)
   }
 

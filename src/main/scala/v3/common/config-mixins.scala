@@ -125,6 +125,25 @@ class WithNSmallBooms(n: Int = 1) extends Config(
   })
 )
 
+/** Enable the isolated DM verification hardware in an experiment target. */
+class WithDMVerification extends Config((site, here, up) => {
+  case DMVerificationKey => true
+})
+
+/** Convert existing BOOM tiles to two memory issue ports without enabling prefetching. */
+class WithTwoMemoryPortBoom extends Config((site, here, up) => {
+  case TilesLocated(InSubsystem) => up(TilesLocated(InSubsystem), site).map {
+    case tp: BoomTileAttachParams =>
+      val core = tp.tileParams.core
+      tp.copy(tileParams = tp.tileParams.copy(core = core.copy(
+        numDCacheBanks = 2,
+        issueParams = core.issueParams.map { ip =>
+          if (ip.iqType == IQT_MEM.litValue) ip.copy(issueWidth = 2) else ip
+        })))
+    case other => other
+  }
+})
+
 /**
  * 2-wide BOOM.
  */
@@ -201,7 +220,7 @@ class WithNLargeBooms(n: Int = 1) extends Config(
               fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true))
             ),
             dcache = Some(
-              DCacheParams(rowBits = 128, nSets=64, nWays=8, nMSHRs=4, nTLBWays=16)
+              DCacheParams(rowBits = 128, nSets=64, nWays=8, nMSHRs=6, nTLBWays=16)
             ),
             icache = Some(
               ICacheParams(rowBits = 128, nSets=64, nWays=8, fetchBytes=4*4)

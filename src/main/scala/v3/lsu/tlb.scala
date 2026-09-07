@@ -13,6 +13,7 @@ import freechips.rocketchip.util._
 import boom.v3.common._
 import boom.v3.exu.{BrResolutionInfo, Exception, FuncUnitResp, CommitSignals}
 import boom.v3.util.{BoolToChar, AgePriorityEncoder, IsKilledByBranch, GetNewBrMask, WrapInc, IsOlder, UpdateBrMask}
+import midas.targetutils.SynthesizePrintf
 
 class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p) {
   require(!instruction)
@@ -43,6 +44,7 @@ class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge
     val eff = Bool() // get/put effects
     val c = Bool()
     val fragmented_superpage = Bool()
+    val dm = Bool()
   }
 
   class Entry(val nSectors: Int, val superpage: Boolean, val superpageOnly: Boolean) extends Bundle {
@@ -176,7 +178,7 @@ class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge
   val ppn = widthMap(w => Mux1H(hitsVec(w) :+ !vm_enabled(w), all_entries.map(_.ppn(vpn(w))) :+ vpn(w)(ppnBits-1, 0)))
 
     // permission bit arrays
-  when (do_refill) {
+  when (do_refill && !invalidate_refill) {
     val pte = io.ptw.resp.bits.pte
     val newEntry = Wire(new EntryData)
     newEntry.ppn := pte.ppn
@@ -194,6 +196,7 @@ class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge
     newEntry.paa := prot_aa(0)
     newEntry.eff := prot_eff(0)
     newEntry.fragmented_superpage := io.ptw.resp.bits.fragmented_superpage
+    newEntry.dm := pte.dm
 
     when (special_entry.nonEmpty.B && !io.ptw.resp.bits.homogeneous) {
       special_entry.foreach(_.insert(r_refill_tag, io.ptw.resp.bits.level, newEntry))
@@ -204,6 +207,10 @@ class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge
     }.otherwise {
       val waddr = Mux(r_sectored_hit, r_sectored_hit_addr, r_sectored_repl_addr)
       for ((e, i) <- sectored_entries.zipWithIndex) when (waddr === i.U) {
+        when (!r_sectored_hit && e.valid.orR) {
+          SynthesizePrintf("[DM_TLB_REPLACE] entry=%d old_tag=0x%x new_vpn=0x%x dm=%d\n",
+            i.U, e.tag, r_refill_tag, pte.dm)
+        }
         when (!r_sectored_hit) { e.invalidate() }
         e.insert(r_refill_tag, 0.U, newEntry)
       }
@@ -224,6 +231,7 @@ class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge
   val px_array     = widthMap(w => Cat(Fill(nPhysicalEntries, prot_x(w))   , normal_entries(w).map(_.px).asUInt) & ~ptw_ae_array(w))
   val eff_array    = widthMap(w => Cat(Fill(nPhysicalEntries, prot_eff(w)) , normal_entries(w).map(_.eff).asUInt))
   val c_array      = widthMap(w => Cat(Fill(nPhysicalEntries, cacheable(w)), normal_entries(w).map(_.c).asUInt))
+  val dm_array     = widthMap(w => Cat(Fill(nPhysicalEntries, false.B), normal_entries(w).map(_.dm).asUInt))
   val paa_array    = widthMap(w => Cat(Fill(nPhysicalEntries, prot_aa(w))  , normal_entries(w).map(_.paa).asUInt))
   val pal_array    = widthMap(w => Cat(Fill(nPhysicalEntries, prot_al(w))  , normal_entries(w).map(_.pal).asUInt))
   val paa_array_if_cached = widthMap(w => paa_array(w) | Mux(usingAtomicsInCache.B, c_array(w), 0.U))
@@ -308,6 +316,20 @@ class NBDTLB(instruction: Boolean, lgMaxSize: Int, cfg: TLBConfig)(implicit edge
     io.resp(w).paddr := Cat(ppn(w), io.req(w).bits.vaddr(pgIdxBits-1, 0))
     io.resp(w).size := io.req(w).bits.size
     io.resp(w).cmd := io.req(w).bits.cmd
+    io.resp(w).dm := (dm_array(w) & hits(w)).orR
+    when (io.req(w).fire && !io.resp(w).miss) {
+      SynthesizePrintf("[DM_TLB_HIT] vaddr=0x%x paddr=0x%x dm=%d cmd=%d\n",
+        io.req(w).bits.vaddr, io.resp(w).paddr, io.resp(w).dm, io.req(w).bits.cmd)
+    }
+  }
+
+  when (io.ptw.resp.valid) {
+    SynthesizePrintf("[DM_TLB_REFILL] vpn=0x%x ppn=0x%x dm=%d level=%d\n",
+      r_refill_tag, io.ptw.resp.bits.pte.ppn, io.ptw.resp.bits.pte.dm, io.ptw.resp.bits.level)
+    when (invalidate_refill) {
+      SynthesizePrintf("[DM_TLB_REFILL_INVALIDATED] vpn=0x%x ppn=0x%x dm=%d state=%d sfence=%d\n",
+        r_refill_tag, io.ptw.resp.bits.pte.ppn, io.ptw.resp.bits.pte.dm, state, io.sfence.valid)
+    }
   }
 
   io.ptw.req.valid := state === s_request
